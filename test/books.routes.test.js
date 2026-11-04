@@ -40,8 +40,11 @@ function objectIdValue(value) {
 function matches(document, filter) {
   return Object.entries(filter).every(([key, expected]) => {
     const actual = document[key];
-    if (expected && typeof expected === "object" && "$gte" in expected) {
-      return actual >= expected.$gte;
+    if (expected && typeof expected === "object" && !(expected instanceof ObjectId)) {
+      if ("$gte" in expected && !(actual >= expected.$gte)) return false;
+      if ("$gt" in expected && !(actual > expected.$gt)) return false;
+      if ("$lt" in expected && !(actual < expected.$lt)) return false;
+      return true;
     }
 
     return objectIdValue(actual) === objectIdValue(expected);
@@ -151,11 +154,23 @@ const database = {
     throw new Error(`Unexpected collection: ${name}`);
   },
 };
+let transactionTail = Promise.resolve();
 const mongoClient = {
   startSession() {
     return {
       async withTransaction(callback) {
-        return callback();
+        const previous = transactionTail;
+        let release;
+        transactionTail = new Promise((resolve) => {
+          release = resolve;
+        });
+        await previous;
+
+        try {
+          return await callback();
+        } finally {
+          release();
+        }
       },
       async endSession() {},
     };
@@ -413,4 +428,131 @@ test("DELETE /books/:id enforces ownership and rejects active borrows", async ()
   });
   assert.equal(deleted.status, 204);
   assert.equal(bookCollection.documents.length, 0);
+});
+
+test("POST /borrows prevents duplicate borrows and atomically limits stock", async () => {
+  const book = makeBook({ totalCopies: 2, availableCopies: 2 });
+  bookCollection.documents.push(book);
+  const userToken = await tokenFor();
+
+  const requests = await Promise.all([
+    request("/borrows", {
+      method: "POST",
+      bearer: userToken,
+      body: { bookId: book._id.toHexString() },
+    }),
+    request("/borrows", {
+      method: "POST",
+      bearer: userToken,
+      body: { bookId: book._id.toHexString() },
+    }),
+  ]);
+  assert.deepEqual(requests.map(({ status }) => status).sort(), [201, 409]);
+  assert.equal(book.availableCopies, 1);
+  assert.equal(borrowCollection.documents.length, 1);
+
+  const lastCopyRequests = await Promise.all(
+    ["user-2", "user-3"].map(async (userId) =>
+      request("/borrows", {
+        method: "POST",
+        bearer: await tokenFor({ userId }),
+        body: { bookId: book._id.toHexString() },
+      }),
+    ),
+  );
+  assert.deepEqual(lastCopyRequests.map(({ status }) => status).sort(), [201, 409]);
+  assert.equal(book.availableCopies, 0);
+  assert.equal(borrowCollection.documents.length, 2);
+
+  assert.equal(
+    (
+      await request("/borrows", {
+        method: "POST",
+        body: { bookId: book._id.toHexString() },
+      })
+    ).status,
+    401,
+  );
+  assert.equal(
+    (
+      await request("/borrows", {
+        method: "POST",
+        bearer: userToken,
+        body: { bookId: book._id.toHexString(), userId: "spoofed-user" },
+      })
+    ).status,
+    400,
+  );
+});
+
+test("GET /borrows only exposes the authenticated user's borrow records", async () => {
+  const book = makeBook();
+  bookCollection.documents.push(book);
+  const userToken = await tokenFor();
+  const otherUserToken = await tokenFor({ userId: "user-2", email: "other@example.com" });
+
+  await request("/borrows", {
+    method: "POST",
+    bearer: userToken,
+    body: { bookId: book._id.toHexString() },
+  });
+  await request("/borrows", {
+    method: "POST",
+    bearer: otherUserToken,
+    body: { bookId: book._id.toHexString() },
+  });
+
+  const response = await request("/borrows", { bearer: userToken });
+  const result = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(result.borrows.length, 1);
+  assert.equal(result.borrows[0].userId, "user-1");
+  assert.equal(result.pagination.total, 1);
+  assert.equal((await request("/borrows")).status, 401);
+});
+
+test("DELETE /borrows/:id returns only the owner's borrow and restores stock once", async () => {
+  const book = makeBook({ totalCopies: 2, availableCopies: 2 });
+  bookCollection.documents.push(book);
+  const ownerToken = await tokenFor();
+  const otherUserToken = await tokenFor({ userId: "user-2", email: "other@example.com" });
+  const created = await request("/borrows", {
+    method: "POST",
+    bearer: ownerToken,
+    body: { bookId: book._id.toHexString() },
+  });
+  const { borrow } = await created.json();
+
+  const forbidden = await request(`/borrows/${borrow._id}`, {
+    method: "DELETE",
+    bearer: otherUserToken,
+  });
+  assert.equal(forbidden.status, 404);
+  assert.equal(book.availableCopies, 1);
+  assert.equal(borrowCollection.documents.length, 1);
+
+  const returned = await request(`/borrows/${borrow._id}`, {
+    method: "DELETE",
+    bearer: ownerToken,
+  });
+  assert.equal(returned.status, 204);
+  assert.equal(book.availableCopies, 2);
+  assert.equal(borrowCollection.documents.length, 0);
+
+  const repeatedReturn = await request(`/borrows/${borrow._id}`, {
+    method: "DELETE",
+    bearer: ownerToken,
+  });
+  assert.equal(repeatedReturn.status, 404);
+  assert.equal(book.availableCopies, 2);
+
+  assert.equal(
+    (
+      await request("/borrows/not-an-object-id", {
+        method: "DELETE",
+        bearer: ownerToken,
+      })
+    ).status,
+    400,
+  );
 });
