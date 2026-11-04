@@ -12,6 +12,7 @@ const issuer = "https://auth.booknook.test";
 const audience = "https://auth.booknook.test";
 const signingKeyId = "booknook-test-key";
 const { privateKey, publicKey } = await generateKeyPair("EdDSA");
+const { privateKey: unrelatedPrivateKey } = await generateKeyPair("EdDSA");
 const jwk = {
   ...(await exportJWK(publicKey)),
   kid: signingKeyId,
@@ -192,15 +193,19 @@ async function tokenFor({
   userId = "user-1",
   name = "Test Reader",
   email = "reader@example.com",
+  tokenIssuer = issuer,
+  tokenAudience = audience,
+  expiresAt = "2m",
+  signingKey = privateKey,
 } = {}) {
   return new SignJWT({ name, email })
     .setProtectedHeader({ alg: "EdDSA", kid: signingKeyId })
     .setSubject(userId)
-    .setIssuer(issuer)
-    .setAudience(audience)
+    .setIssuer(tokenIssuer)
+    .setAudience(tokenAudience)
     .setIssuedAt()
-    .setExpirationTime("2m")
-    .sign(privateKey);
+    .setExpirationTime(expiresAt)
+    .sign(signingKey);
 }
 
 async function request(path, { method = "GET", body, bearer } = {}) {
@@ -291,6 +296,29 @@ test("POST /books requires a valid JWT and derives owner fields from its claims"
     ).status,
     401,
   );
+
+  for (const claims of [
+    { tokenIssuer: "https://wrong-issuer.example" },
+    { tokenAudience: "https://wrong-audience.example" },
+    { expiresAt: 946684800 },
+    { signingKey: unrelatedPrivateKey },
+  ]) {
+    const invalidToken = await tokenFor(claims);
+    const invalidResponse = await request("/books", {
+      method: "POST",
+      bearer: invalidToken,
+      body,
+    });
+    assert.equal(invalidResponse.status, 401);
+  }
+
+  const missingIdentity = await tokenFor({ email: null });
+  const missingIdentityResponse = await request("/books", {
+    method: "POST",
+    bearer: missingIdentity,
+    body,
+  });
+  assert.equal(missingIdentityResponse.status, 401);
 
   const bearer = await tokenFor();
   const invalid = await request("/books", {

@@ -18,13 +18,16 @@ export function createAuthenticate({ keySet, issuer, audience }) {
       ({ payload } = await jwtVerify(match[1], keySet, {
         issuer,
         audience,
-        algorithms: ["EdDSA"],
       }));
     } catch (error) {
-      if (error instanceof errors.JWKSTimeout) {
+      if (
+        error instanceof errors.JWKSTimeout ||
+        error instanceof TypeError ||
+        (error instanceof errors.JOSEError && error.constructor === errors.JOSEError)
+      ) {
         return response
           .status(503)
-          .json({ error: "Authentication service is temporarily unavailable." });
+          .json({ error: "The Better Auth JWKS service is unavailable or misconfigured." });
       }
 
       if (error instanceof errors.JOSEError) {
