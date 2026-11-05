@@ -277,6 +277,22 @@ test("GET /books is public, paginated, and sorted newest first", async () => {
   assert.equal(invalidPage.status, 400);
 });
 
+test("GET /books/mine only lists books owned by the authenticated reader", async () => {
+  bookCollection.documents = [
+    makeBook({ title: "Mine", ownerId: "user-1" }),
+    makeBook({ title: "Someone else's", ownerId: "user-2" }),
+  ];
+  assert.equal((await request("/books/mine")).status, 401);
+
+  const response = await request("/books/mine?page=1&limit=1", {
+    bearer: await tokenFor(),
+  });
+  const result = await response.json();
+  assert.equal(response.status, 200);
+  assert.deepEqual(result.books.map((book) => book.title), ["Mine"]);
+  assert.equal(result.pagination.total, 1);
+});
+
 test("GET /books/:id returns a book and validates IDs", async () => {
   const book = makeBook();
   bookCollection.documents.push(book);
@@ -483,6 +499,30 @@ test("POST /borrows prevents duplicate borrows and atomically limits stock", asy
     ).status,
     400,
   );
+});
+
+test("POST /borrows stores the requested due date and validates the borrow period", async () => {
+  const book = makeBook();
+  bookCollection.documents.push(book);
+  const bearer = await tokenFor();
+
+  const invalid = await request("/borrows", {
+    method: "POST",
+    bearer,
+    body: { bookId: book._id.toHexString(), durationDays: 31 },
+  });
+  assert.equal(invalid.status, 400);
+
+  const response = await request("/borrows", {
+    method: "POST",
+    bearer,
+    body: { bookId: book._id.toHexString(), durationDays: 5 },
+  });
+  const { borrow } = await response.json();
+  assert.equal(response.status, 201);
+  const duration =
+    new Date(borrow.dueAt).getTime() - new Date(borrow.borrowedAt).getTime();
+  assert.ok(Math.abs(duration - 5 * 24 * 60 * 60 * 1000) < 1000);
 });
 
 test("GET /borrows only exposes the authenticated user's borrow records", async () => {

@@ -54,13 +54,17 @@ export function createBorrowsRouter({ authenticateRequest }) {
       !request.body ||
       typeof request.body !== "object" ||
       Array.isArray(request.body) ||
-      Object.keys(request.body).length !== 1 ||
-      !Object.hasOwn(request.body, "bookId")
+      !Object.hasOwn(request.body, "bookId") ||
+      Object.keys(request.body).some((field) => !["bookId", "durationDays"].includes(field))
     ) {
-      throw new HttpError(400, "Request body must contain only bookId.");
+      throw new HttpError(400, "Request body must contain bookId and may contain durationDays.");
     }
 
     const bookId = parseBookId(request.body.bookId);
+    const durationDays = request.body.durationDays ?? 7;
+    if (!Number.isInteger(durationDays) || durationDays < 1 || durationDays > 30) {
+      throw new HttpError(400, "durationDays must be an integer between 1 and 30.");
+    }
     const { database, mongoClient } = getDatabase(request);
     const books = database.collection("books");
     const borrows = database.collection("borrows");
@@ -105,6 +109,7 @@ export function createBorrowsRouter({ authenticateRequest }) {
           userName: request.auth.name,
           userEmail: request.auth.email,
           borrowedAt: new Date(),
+          dueAt: new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000),
         };
 
         const result = await borrows.insertOne(borrow, { session });

@@ -169,6 +169,38 @@ export function createBooksRouter({ authenticateRequest }) {
     });
   });
 
+  router.get("/mine", authenticateRequest, async (request, response) => {
+    const page = parsePositiveInteger(request.query.page, "page", 1, Number.MAX_SAFE_INTEGER);
+    const limit = parsePositiveInteger(request.query.limit, "limit", 12, 100);
+    const skip = (page - 1) * limit;
+
+    if (!Number.isSafeInteger(skip)) {
+      throw new HttpError(400, "Requested page is too large.");
+    }
+
+    const books = getBooksCollection(request);
+    const filter = { ownerId: request.auth.userId };
+    const [items, total] = await Promise.all([
+      books
+        .find(filter)
+        .sort({ addedAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit)
+        .toArray(),
+      books.countDocuments(filter),
+    ]);
+
+    return response.json({
+      books: items,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  });
+
   router.get("/:id", async (request, response) => {
     const id = parseBookId(request.params.id);
     const book = await getBooksCollection(request).findOne({ _id: id });
