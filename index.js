@@ -1,6 +1,7 @@
 import "dotenv/config";
 import cors from "cors";
 import express from "express";
+import multer from "multer";
 import { MongoClient, ObjectId } from "mongodb";
 import { createLocalJWKSet, createRemoteJWKSet, errors, jwtVerify } from "jose";
 import { readFile } from "node:fs/promises";
@@ -66,6 +67,18 @@ const stringLimits = {
   image: 2048,
   description: 5000,
 };
+const allowedImageTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const imageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 4 * 1024 * 1024, files: 1 },
+  fileFilter(request, file, callback) {
+    if (!allowedImageTypes.has(file.mimetype)) {
+      callback(new HttpError(400, "Cover must be a JPEG, PNG, WebP, or GIF image."));
+      return;
+    }
+    callback(null, true);
+  },
+});
 
 export class HttpError extends Error {
   constructor(status, message, details) {
@@ -315,6 +328,12 @@ async function executeTransaction(client, action) {
 
 function errorHandler(error, request, response, next) {
   if (response.headersSent) return next(error);
+  if (error instanceof multer.MulterError) {
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return response.status(413).json({ error: "Cover image must be 4 MB or smaller." });
+    }
+    return response.status(400).json({ error: "Upload one image file using the image field." });
+  }
   if (error.type === "entity.parse.failed") {
     return response.status(400).json({ error: "Request body must be valid JSON." });
   }
@@ -328,6 +347,9 @@ function errorHandler(error, request, response, next) {
   const status = Number.isInteger(error.status) ? error.status : 500;
   if (status >= 500) {
     console.error("API request failed.", error);
+    if (error instanceof HttpError) {
+      return response.status(status).json({ error: error.message });
+    }
     return response.status(500).json({ error: "An unexpected server error occurred." });
   }
 
@@ -363,6 +385,51 @@ export function createApp({ authenticateRequest = createAuthenticate() } = {}) {
     }),
   );
   app.use(express.json({ limit: "1mb" }));
+
+  // POST /images — authenticated ImgBB upload; MongoDB stores the returned URL with the book.
+  app.post(
+    "/images",
+    authenticateRequest,
+    (request, response, next) => {
+      imageUpload.single("image")(request, response, next);
+    },
+    async (request, response) => {
+      if (!request.file) {
+        throw new HttpError(400, "Choose a cover image to upload.");
+      }
+
+      const apiKey = process.env.IMGBB_API_KEY?.trim();
+      if (!apiKey) {
+        throw new HttpError(
+          503,
+          "Image upload is not configured. Set IMGBB_API_KEY on the API server.",
+        );
+      }
+
+      const formData = new FormData();
+      formData.set("key", apiKey);
+      formData.set(
+        "image",
+        new Blob([request.file.buffer], { type: request.file.mimetype }),
+        request.file.originalname,
+      );
+
+      const uploadResponse = await fetch("https://api.imgbb.com/1/upload", {
+        method: "POST",
+        body: formData,
+      });
+      const result = await uploadResponse.json().catch(() => null);
+      const url = result?.data?.display_url || result?.data?.url;
+      if (!uploadResponse.ok || result?.success !== true || typeof url !== "string") {
+        throw new HttpError(
+          502,
+          result?.error?.message || "ImgBB could not upload this cover image.",
+        );
+      }
+
+      return response.status(201).json({ url });
+    },
+  );
 
   // GET /books — public, paginated list of books.
   app.get("/books", async (request, response) => {
@@ -817,11 +884,13 @@ async function runCommand() {
   const command = process.argv[2];
   if (command === "--seed") {
     await seedBooks();
-    return;
+    await mongoClient.close();
+    process.exit(0);
   }
   if (command === "--migrate") {
     await migrateDatabase();
-    return;
+    await mongoClient.close();
+    process.exit(0);
   }
   if (command) {
     throw new Error(`Unknown command "${command}". Use --seed or --migrate.`);

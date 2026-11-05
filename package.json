@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "nodemon index.js",
     "start": "node index.js",
+    "build": "node --check index.js",
     "test": "node --test",
     "migrate": "node index.js --migrate",
     "seed": "node index.js --seed"
@@ -19,7 +20,8 @@
     "dotenv": "^18.0.9",
     "express": "^5.3.0",
     "jose": "^6.2.15",
-    "mongodb": "^7.8.0"
+    "mongodb": "^7.8.0",
+    "multer": "^2.5.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.11"
