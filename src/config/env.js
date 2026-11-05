@@ -14,6 +14,18 @@ function getRequiredEnvironmentVariable(name) {
 
 const portValue = process.env.PORT?.trim() || "8000";
 const port = Number(portValue);
+const defaultClientUrl =
+  process.env.NODE_ENV === "production"
+    ? "https://booknookclientsite.vercel.app"
+    : "http://localhost:3000";
+const clientUrl = (
+  process.env.CLIENT_URL?.trim() || defaultClientUrl
+).replace(/\/+$/, "");
+const authBaseUrl = (
+  process.env.BETTER_AUTH_URL?.trim() ||
+  clientUrl ||
+  defaultClientUrl
+).replace(/\/+$/, "");
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be an integer between 1 and 65535.");
@@ -22,12 +34,17 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 export const env = Object.freeze({
   port,
   mongodbUri: getRequiredEnvironmentVariable("MONGODB_URI"),
-  dbName: getRequiredEnvironmentVariable("DB_NAME"),
+  dbName: process.env.DB_NAME?.trim() || "booknook",
   allowedOrigin:
-    process.env.ALLOWED_ORIGIN?.trim() || "http://localhost:3000",
-  betterAuthIssuer: getRequiredEnvironmentVariable("BETTER_AUTH_ISSUER"),
-  betterAuthAudience: getRequiredEnvironmentVariable("BETTER_AUTH_AUDIENCE"),
-  betterAuthJwksUrl: getRequiredEnvironmentVariable("BETTER_AUTH_JWKS_URL"),
+    (process.env.ALLOWED_ORIGIN?.trim() || clientUrl || "http://localhost:3000")
+      .replace(/\/+$/, ""),
+  betterAuthIssuer:
+    process.env.BETTER_AUTH_ISSUER?.trim() || authBaseUrl,
+  betterAuthAudience:
+    process.env.BETTER_AUTH_AUDIENCE?.trim() || authBaseUrl,
+  betterAuthJwksUrl:
+    process.env.BETTER_AUTH_JWKS_URL?.trim() ||
+    `${authBaseUrl}/api/auth/jwks`,
 });
 
 try {
