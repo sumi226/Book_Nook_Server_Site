@@ -16,6 +16,23 @@ function requiredEnvironmentVariable(name) {
   return value;
 }
 
+function environmentUrlCandidates(value) {
+  return (value || "")
+    .split(",")
+    .map((url) => url.trim().replace(/\/+$/, ""))
+    .filter(Boolean);
+}
+
+function selectEnvironmentUrl(value, fallback) {
+  const candidates = environmentUrlCandidates(value);
+  const isLocalUrl = (url) => /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(url);
+  const preferred = process.env.NODE_ENV === "production"
+    ? candidates.find((url) => !isLocalUrl(url))
+    : candidates.find(isLocalUrl);
+
+  return preferred || fallback;
+}
+
 const port = Number(process.env.PORT?.trim() || "8000");
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be an integer between 1 and 65535.");
@@ -25,17 +42,20 @@ const defaultClientUrl =
   process.env.NODE_ENV === "production"
     ? "https://booknookclientsite.vercel.app"
     : "http://localhost:3000";
-const clientUrl = (
-  process.env.CLIENT_URL?.trim() || defaultClientUrl
-).replace(/\/+$/, "");
-const authBaseUrl = (
-  process.env.BETTER_AUTH_URL?.trim() || clientUrl
-).replace(/\/+$/, "");
+const clientUrlCandidates = environmentUrlCandidates(process.env.CLIENT_URL);
+const allowedOriginCandidates = environmentUrlCandidates(process.env.ALLOWED_ORIGIN);
+const clientUrl = selectEnvironmentUrl(process.env.CLIENT_URL, defaultClientUrl);
+const authBaseUrl = selectEnvironmentUrl(process.env.BETTER_AUTH_URL, clientUrl);
 const mongodbUri = requiredEnvironmentVariable("MONGODB_URI");
 const dbName = process.env.DB_NAME?.trim() || "booknook";
-const allowedOrigin = (
-  process.env.ALLOWED_ORIGIN?.trim() || clientUrl
-).replace(/\/+$/, "");
+const allowedOrigins = [
+  ...clientUrlCandidates,
+  ...allowedOriginCandidates,
+  clientUrl,
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "https://booknookclientsite.vercel.app",
+];
 const authIssuer = process.env.BETTER_AUTH_ISSUER?.trim() || authBaseUrl;
 const authAudience = process.env.BETTER_AUTH_AUDIENCE?.trim() || authBaseUrl;
 const jwksUrl = process.env.BETTER_AUTH_JWKS_URL?.trim() ||
@@ -360,26 +380,15 @@ function errorHandler(error, request, response, next) {
 
 export function createApp({ authenticateRequest = createAuthenticate() } = {}) {
   const app = express();
-  const allowedOrigins = [
-    clientUrl,
-    allowedOrigin,
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "https://booknookclientsite.vercel.app",
-  ].filter(Boolean);
+  const normalizedAllowedOrigins = new Set(allowedOrigins);
 
   app.use(
     cors({
       origin: (origin, callback) => {
-        if (
-          !origin ||
-          allowedOrigins.includes(origin) ||
-          allowedOrigins.includes(origin.replace(/\/+$/, "")) ||
-          /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
-        ) {
+        if (!origin || normalizedAllowedOrigins.has(origin.replace(/\/+$/, ""))) {
           return callback(null, true);
         }
-        return callback(null, true);
+        return callback(null, false);
       },
       credentials: true,
     }),
